@@ -8,6 +8,15 @@ interface InFlightOperation<T> {
   createdAt: number;
 }
 
+interface FailedOperation {
+  sequence: string;
+  failedAt: number;
+}
+
+const FAILED_SEQUENCE_TTL_MS = 60_000;
+const DEFAULT_MAX_IN_FLIGHT = 100;
+const DEFAULT_TTL_MS = 120_000;
+
 /**
  * Shared, process-wide tracker used to deduplicate identical concurrent
  * requests across every SoroWillClient instance (multiple tabs, workers, etc.).
@@ -18,20 +27,46 @@ interface InFlightOperation<T> {
  * `new SoroWillClient({ inFlightTracker: globalInFlightTracker })` (or simply
  * reusing a single SoroWillClient instance) makes the deduplication global.
  */
-export const globalInFlightTracker = /* @__PURE__ */ new InFlightTracker();
 
 export class InFlightTracker {
   private readonly inFlight = new Map<OperationKey, InFlightOperation<unknown>>();
   private readonly failedSequences = new Map<OperationKey, FailedOperation>();
+  private readonly maxInFlight: number;
+  private readonly ttlMs: number;
+  private readonly scopeId: string | undefined;
+
+  constructor(scopeIdOrMaxInFlight?: string | number, ttlMs: number = DEFAULT_TTL_MS) {
+    if (typeof scopeIdOrMaxInFlight === 'string') {
+      // Called with scopeId
+      this.scopeId = scopeIdOrMaxInFlight;
+      this.maxInFlight = DEFAULT_MAX_IN_FLIGHT;
+      this.ttlMs = ttlMs;
+    } else {
+      // Called with maxInFlight (backwards compatible)
+      this.scopeId = undefined;
+      this.maxInFlight = scopeIdOrMaxInFlight ?? DEFAULT_MAX_IN_FLIGHT;
+      this.ttlMs = ttlMs;
+    }
+  }
 
   getKey(willId: string | bigint, method: string, clientId?: string): OperationKey {
     const id = typeof willId === 'bigint' ? willId.toString() : willId;
-    const scope = clientId ?? '';
-    return `${scope}:${id}:${method}`;
+    const scope = clientId ?? this.scopeId;
+    return scope ? `${scope}::${id}:${method}` : `${id}:${method}`;
   }
 
   isInFlight(willId: string | bigint, method: string, clientId?: string): boolean {
-    return this.inFlight.has(this.getKey(willId, method, clientId));
+    const key = this.getKey(willId, method, clientId);
+    const op = this.inFlight.get(key);
+    if (!op) return false;
+
+    // Lazy eviction: check if this entry has expired
+    if (this.isExpired(op)) {
+      this.evict(key, op);
+      return false;
+    }
+
+    return true;
   }
 
   getInFlightPromise<T>(
@@ -39,8 +74,17 @@ export class InFlightTracker {
     method: string,
     clientId?: string,
   ): OperationResult<T> | undefined {
-    const op = this.inFlight.get(this.getKey(willId, method, clientId));
-    return op?.promise as OperationResult<T> | undefined;
+    const key = this.getKey(willId, method, clientId);
+    const op = this.inFlight.get(key);
+    if (!op) return undefined;
+
+    // Lazy eviction: check if this entry has expired
+    if (this.isExpired(op)) {
+      this.evict(key, op);
+      return undefined;
+    }
+
+    return op.promise as OperationResult<T>;
   }
 
   /**
@@ -99,13 +143,13 @@ export class InFlightTracker {
     method: string,
     operation: (signal: AbortSignal) => PromiseLike<T>,
     clientId?: string,
-  ): PromiseLike<T> {
+  ): Promise<T> {
     const key = this.getKey(willId, method, clientId);
 
     const existing = this.inFlight.get(key);
     if (existing) {
       if (!this.isExpired(existing)) {
-        return existing.promise as PromiseLike<T>;
+        return existing.promise as Promise<T>;
       }
       // Expired entry — evict and start a fresh operation.
       this.evict(key, existing);
@@ -118,7 +162,7 @@ export class InFlightTracker {
     }
 
     const controller = new AbortController();
-    const entry = { controller } as InFlightOperation<T>;
+    const entry = { controller, createdAt: Date.now() } as InFlightOperation<T>;
     entry.promise = Promise.resolve(operation(controller.signal)).finally(() => {
       // Only remove the entry this call created; a newer track() may own the key now.
       if (this.inFlight.get(key) === entry) {
@@ -142,7 +186,7 @@ export class InFlightTracker {
     willId: string | bigint,
     method: string,
     operation: (signal: AbortSignal) => PromiseLike<T>,
-  ): PromiseLike<T> | undefined {
+  ): Promise<T> | undefined {
     const key = this.getKey(willId, method);
 
     if (!this.inFlight.has(key)) {
@@ -216,3 +260,5 @@ export class InFlightTracker {
     }
   }
 }
+
+export const globalInFlightTracker = /* @__PURE__ */ new InFlightTracker();

@@ -38,6 +38,7 @@ import type {
 import { WillStatus } from './types';
 import {
   getDefaultWalletAdapter,
+  normalizeSignatureResponse,
   type WalletAdapter,
 } from './wallet';
 import {
@@ -51,7 +52,6 @@ import {
   InvokeFailedError,
   RequestTimeoutError,
   mapContractError,
-  RequestTimeoutError,
   SimulationError,
   SoroWillError,
   SoroWillInvalidAmountError,
@@ -563,7 +563,7 @@ function mapEventRecord(record: RawEventRecord, fallbackContractId: string): Sor
     ledgerClosedAt: record.ledgerClosedAt ? new Date(record.ledgerClosedAt) : null,
     contractId: record.contractId ?? fallbackContractId,
     txHash: record.txHash ?? null,
-    type: record.type ?? null,
+    type: record.type ?? '',
     topics: record.topics ?? record.topic ?? [],
     value: record.value,
     raw: record,
@@ -694,6 +694,7 @@ export class SoroWillClient {
    * stale fees from the previous network (#500).
    */
   private feeStatsCache: Map<string, rpc.Api.GetFeeStatsResponse>;
+  private lastFeeStatsCachedPassphrase: string | undefined;
   private readonly debug: boolean;
   private readonly debugLogger: DebugLogger;
   private readonly autoFeeBumpOnTimeout: boolean;
@@ -1490,12 +1491,13 @@ export class SoroWillClient {
           context: 'batch',
         });
 
-        const signedTxXdr = await this.wallet.signTransaction(prepared.toXDR(), {
+        const signedTxResponse = await this.wallet.signTransaction(prepared.toXDR(), {
           networkPassphrase: this.networkPassphrase,
         });
+        const signedTxXdr = normalizeSignatureResponse(signedTxResponse);
         const result = await this.submitSignedTransaction(signedTxXdr, options);
         txHash = result.txHash;
-        return { txHash: result.txHash, createdAt: result.createdAt };
+        return { success: true, txHash: result.txHash, createdAt: result.createdAt };
       });
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
@@ -1645,7 +1647,7 @@ export class SoroWillClient {
         get closed() {
           return closed;
         },
-        close: () => {
+        unsubscribe: () => {
           if (closed) return;
           closed = true;
           clearConnectTimer();
@@ -1654,6 +1656,9 @@ export class SoroWillClient {
           } catch {
             // Best-effort close; the socket may already be gone.
           }
+        },
+        close() {
+          this.unsubscribe();
         },
       };
 
@@ -1733,10 +1738,13 @@ export class SoroWillClient {
       get closed() {
         return closed;
       },
-      close: () => {
+      unsubscribe: () => {
         if (closed) return;
         closed = true;
         if (timer !== undefined) clearTimeout(timer);
+      },
+      close() {
+        this.unsubscribe();
       },
     };
 
@@ -2106,9 +2114,10 @@ export class SoroWillClient {
       );
       this.debugLogger.logSimulation(label, undefined, prepared.fee);
 
-      const signedTxXdr = await this.wallet.signTransaction(prepared.toXDR(), {
+      const signedTxResponse = await this.wallet.signTransaction(prepared.toXDR(), {
         networkPassphrase: this.networkPassphrase,
       });
+      const signedTxXdr = normalizeSignatureResponse(signedTxResponse);
       const signedTx = TransactionBuilder.fromXDR(
         signedTxXdr,
         this.networkPassphrase,
@@ -2179,9 +2188,10 @@ export class SoroWillClient {
             options,
           );
 
-          const feeBumpSignedXdr = await this.wallet.signTransaction(feeBumpPrepared.toXDR(), {
+          const feeBumpSignedResponse = await this.wallet.signTransaction(feeBumpPrepared.toXDR(), {
             networkPassphrase: this.networkPassphrase,
           });
+          const feeBumpSignedXdr = normalizeSignatureResponse(feeBumpSignedResponse);
           const feeBumpSignedTx = TransactionBuilder.fromXDR(
             feeBumpSignedXdr,
             this.networkPassphrase,
@@ -2391,8 +2401,8 @@ export class SoroWillClient {
     // Detect network changes: if the wallet reports a different passphrase than
     // the one we last cached stats for, flush the whole cache first (#500).
     const currentPassphrase = await this.resolveCurrentNetworkPassphrase();
-    if (currentPassphrase !== this.networkPassphrase) {
-      // The wallet is on a different network than the client was configured for.
+    if (currentPassphrase !== this.lastFeeStatsCachedPassphrase && this.lastFeeStatsCachedPassphrase !== undefined) {
+      // The wallet is on a different network than when we last cached.
       // Clear every cached entry so nothing stale leaks through.
       this.feeStatsCache.clear();
     }
@@ -2405,6 +2415,7 @@ export class SoroWillClient {
 
     const result = await this.rpc(() => server.getFeeStats!(), options);
     this.feeStatsCache.set(cacheKey, result);
+    this.lastFeeStatsCachedPassphrase = currentPassphrase;
     return result;
   }
 

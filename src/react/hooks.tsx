@@ -47,12 +47,11 @@ const CLIENT_OPTION_KEYS = [
   'debug',
 ] as const satisfies readonly (keyof SoroWillClientOptions)[];
 
-function useSoroWillClient(options: SoroWillClientOptions): SoroWillClient {
+export function useSoroWillClient(options: SoroWillClientOptions): SoroWillClient {
   const deps = CLIENT_OPTION_KEYS.map((key) => options[key]);
 
   const client = getReact().useMemo(
     () => new SoroWillClient(options),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- deps are derived from CLIENT_OPTION_KEYS
     deps,
   );
 
@@ -72,6 +71,12 @@ function useSoroWillClient(options: SoroWillClientOptions): SoroWillClient {
     if (previousClient && previousClient !== client) {
       previousClient.destroy();
     }
+  }, [client]);
+
+  getReact().useEffect(() => {
+    return () => {
+      client.destroy();
+    };
   }, [client]);
 
   return client;

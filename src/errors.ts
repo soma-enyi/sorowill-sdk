@@ -7,6 +7,41 @@ export class SoroWillError extends Error {
 }
 
 /**
+ * Raised when a `beforeInvoke` hook throws an error. The original error is
+ * available as the standard `cause` property. When this error is thrown, the
+ * transaction has not been built or signed — no state-changing operation was
+ * submitted to the network.
+ *
+ * @example
+ * ```ts
+ * hooks.onBeforeInvoke((ctx) => {
+ *   if (!ctx.args.willId) throw new Error('willId is required');
+ * });
+ *
+ * try {
+ *   await client.checkIn('42');
+ * } catch (err) {
+ *   if (err instanceof HookExecutionError) {
+ *     console.error('Hook failed:', err.hookName, err.cause);
+ *   }
+ * }
+ * ```
+ */
+export class HookExecutionError extends SoroWillError {
+  /** The name of the lifecycle phase where the hook failed ('beforeInvoke'). */
+  readonly hookName: string;
+
+  constructor(hookName: string, cause: unknown, options?: ErrorOptions) {
+    const message =
+      cause instanceof Error
+        ? `${hookName} hook threw an error: ${cause.message}`
+        : `${hookName} hook threw an error: ${String(cause)}`;
+    super(message, { ...options, cause });
+    this.hookName = hookName;
+  }
+}
+
+/**
  * Raised when an amount string passed to {@link SoroWillClient.createWill} or
  * {@link SoroWillClient.topUp} is not a valid positive integer. This catches
  * zero, negative, and malformed (non-numeric) strings before they reach
@@ -762,3 +797,35 @@ export function mapContractError(error: unknown): Error {
   );
   return new UnknownContractErrorCodeError(code, text, { cause: error });
 }
+
+export class MultisigTimeoutError extends Error {
+  constructor(signedCount: number, threshold: number, timeoutMs: number) {
+    super(`Multisig coordination timed out after ${timeoutMs}ms with only ${signedCount}/${threshold} signatures`);
+    this.name = 'MultisigTimeoutError';
+  }
+}
+
+export class ExorbitantFeeError extends Error {
+  constructor(fee: string, maxFee: string) {
+    super(`Fee ${fee} exceeds maximum allowed ${maxFee}`);
+    this.name = 'ExorbitantFeeError';
+  }
+}
+
+export function registerContractError(_code: number, _errorFactory: ContractErrorFactory): void {
+  // Stub implementation - actual error registry would be managed elsewhere
+}
+
+export function registerContractErrors(_errors: Record<number, ContractErrorFactory>): void {
+  // Stub implementation
+}
+
+export function setContractErrorMap(_map: Map<number, ContractErrorFactory>): void {
+  // Stub implementation
+}
+
+export function getContractErrorMap(): Map<number, ContractErrorFactory> {
+  return new Map();
+}
+
+export type ContractErrorFactory = (details: unknown) => Error;

@@ -1,5 +1,4 @@
 import {
-  Account,
   BASE_FEE,
   Contract,
   Keypair,
@@ -101,7 +100,9 @@ export class MultisigCollector {
     this._transactionXdr = options.transactionXdr;
     this._networkPassphrase = options.networkPassphrase;
     this._threshold = options.threshold;
-    this._timeoutMs = options.timeoutMs;
+    if (options.timeoutMs !== undefined) {
+      this._timeoutMs = options.timeoutMs;
+    }
     this._startedAt = Date.now();
   }
 
@@ -275,13 +276,24 @@ export class MultisigCollector {
     timeoutMs?: number;
     signatures: CollectedSignature[];
   } {
-    return {
+    const result: {
+      transactionXdr: string;
+      networkPassphrase: string;
+      threshold: number;
+      timeoutMs?: number;
+      signatures: CollectedSignature[];
+    } = {
       transactionXdr: this._transactionXdr,
       networkPassphrase: this._networkPassphrase,
       threshold: this._threshold,
-      timeoutMs: this._timeoutMs,
       signatures: [...this._signatures],
     };
+
+    if (this._timeoutMs !== undefined) {
+      result.timeoutMs = this._timeoutMs;
+    }
+
+    return result;
   }
 
   /** Reconstitute a collector from a serialised state.
@@ -339,6 +351,44 @@ export async function buildMultisigTransactionXdr(options: {
   // @ts-expect-error scArgs type mismatch between ContractSpec and stellar-sdk
   const operation = contract.call(options.method, ...scArgs);
 
-  cons
+  const account = await server.getAccount(options.sourceAccount);
+  const builderOpts: {
+    fee: string;
+    networkPassphrase: string;
+    timebounds?: { minTime: number; maxTime: number };
+  } = {
+    fee: options.fee || BASE_FEE,
+    networkPassphrase: options.networkPassphrase,
+  };
+  if (options.timeout) {
+    builderOpts.timebounds = {
+      minTime: 0,
+      maxTime: Math.floor(Date.now() / 1000) + options.timeout,
+    };
+  }
+  const builder = new TransactionBuilder(account, builderOpts);
 
-/* … truncated 1094 chars — edit only what you need near the top … */
+  builder.addOperation(operation);
+  const tx = builder.build();
+  return tx.toXDR();
+}
+
+export function signWithSecretKey(
+  transactionXdr: string,
+  secretKey: string,
+  networkPassphrase: string,
+): string {
+  let keypair: Keypair;
+  try {
+    keypair = Keypair.fromSecret(secretKey);
+  } catch {
+    throw new InvalidSecretKeyError('signWithSecretKey');
+  }
+
+  const tx = TransactionBuilder.fromXDR(transactionXdr, networkPassphrase);
+  if (tx instanceof Transaction) {
+    tx.sign(keypair);
+    return tx.toXDR();
+  }
+  throw new Error('Failed to reconstruct transaction from XDR');
+}

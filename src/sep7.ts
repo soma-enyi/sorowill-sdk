@@ -74,13 +74,23 @@ function normalizeSep7Params(input: string | URL | URLSearchParams): URLSearchPa
 }
 
 /**
- * SEP-7 requires parameter values to be percent-encoded so that reserved
- * characters (?, &, =, #, spaces, etc.) inside values such as callback URLs
- * do not break URI parsing. URLSearchParams encodes spaces as `+`, which is
- * not valid in a URI query string, so we additionally normalize `+` to `%20`.
+ * Builds a percent-encoded query string for a SEP-7 URI.
+ *
+ * `URLSearchParams.toString()` encodes spaces as `+` (application/x-www-form-urlencoded),
+ * which is not valid in a URI query string. We use `encodeURIComponent` directly on
+ * each key-value pair to produce proper percent-encoding (`%20` for spaces,
+ * `%3A` for colons, etc.) that is unambiguous in all URI contexts and deeplink handlers.
+ *
+ * Additionally, the SEP-7 `callback` field requires the `url:` prefix to be
+ * included in the encoded value so deeplink handlers can distinguish it from
+ * a plain URL. We encode the full `url:<callbackUrl>` string as a single unit.
  */
 function encodeSep7Params(params: URLSearchParams): string {
-  return params.toString().replace(/\+/g, '%20');
+  const parts: string[] = [];
+  params.forEach((value, key) => {
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  });
+  return parts.join('&');
 }
 
 export function buildSep7TxUri(transactionXdr: string, options: BuildSep7TxUriOptions): string {
@@ -96,10 +106,25 @@ export function buildSep7TxUri(transactionXdr: string, options: BuildSep7TxUriOp
   try {
     callbackUrl = new URL(options.callbackUrl.trim());
   } catch {
-    throw new Error('SEP-7 callback URL must be an absolute http or https URL');
+    throw new Error('SEP-7 callback URL must be an absolute https:// URL or a valid deeplink scheme');
   }
-  if (callbackUrl.protocol !== 'http:' && callbackUrl.protocol !== 'https:') {
-    throw new Error('SEP-7 callback URL must be an absolute http or https URL');
+
+  // Reject http (insecure), data, javascript, and other unsafe schemes
+  if (callbackUrl.protocol === 'http:') {
+    throw new Error('SEP-7 callback URL cannot use http:// (insecure); use https:// or a deeplink scheme like stellar://');
+  }
+
+  // Allow https and common deeplink schemes (stellar, lobstr, myapp, etc)
+  const isHttps = callbackUrl.protocol === 'https:';
+  const isDeeplink = /^[a-z][a-z0-9+.-]*:$/i.test(callbackUrl.protocol) &&
+                     callbackUrl.protocol !== 'http:' &&
+                     callbackUrl.protocol !== 'data:' &&
+                     callbackUrl.protocol !== 'javascript:' &&
+                     callbackUrl.protocol !== 'file:' &&
+                     callbackUrl.protocol !== 'ftp:';
+
+  if (!isHttps && !isDeeplink) {
+    throw new Error('SEP-7 callback URL must be an absolute https:// URL or a valid deeplink scheme');
   }
 
   if (options.message && options.message.length > SEP7_MAX_MESSAGE_LENGTH) {
@@ -135,6 +160,7 @@ export function parseSep7Callback(
     params.get('xdr') ??
     params.get('signedTxXdr') ??
     params.get('signed_tx_xdr') ??
+    params.get('envelope_xdr') ??
     params.get('tx');
 
   if (!transactionXdrValue) {

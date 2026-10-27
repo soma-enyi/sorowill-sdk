@@ -9,13 +9,13 @@ import { WillStatus } from './types';
  * {@link toStroops} when the caller does not supply an explicit `decimals`
  * value.
  *
- * **Assumption**: this default of 6 matches canonical USDC on most chains
- * (Ethereum, Polygon, etc.). USDC-like or bridged tokens can use a different
- * scale (e.g. 7 decimals for classic Stellar asset precision, or 8 for some
- * wrapped tokens), so callers handling such tokens must pass the token's
- * actual `decimals` explicitly to avoid displaying incorrect amounts.
+ * **Assumption**: this default of 7 matches USDC-like tokens on Soroban,
+ * which use 7 decimal places (classic Stellar asset precision). Canonical
+ * USDC on Ethereum/Polygon uses 6 decimals; callers handling such tokens
+ * must pass the token's actual `decimals` explicitly to avoid displaying
+ * incorrect amounts.
  */
-const USDC_DECIMALS = 6;
+const USDC_DECIMALS = 7;
 
 /**
  * Approximate Soroban ledger close time, in milliseconds. Matches the
@@ -55,20 +55,42 @@ export function formatUSDC(stroops: bigint, decimals = USDC_DECIMALS): string {
   const negative = stroops < 0n;
   const absolute = negative ? -stroops : stroops;
   const base = 10n ** BigInt(decimals);
-  const totalCents = (absolute * 100n + base / 2n) / base;
-  const whole = totalCents / 100n;
-  const cents = totalCents % 100n;
+  let whole = absolute / base;
+  let fraction = absolute % base;
+
+  // Round to 2 decimal places (cents)
+  if (decimals > 2) {
+    const divisor = 10n ** BigInt(decimals - 2);
+    const remainder = fraction % divisor;
+    const halfDivisor = divisor / 2n;
+    if (remainder >= halfDivisor) {
+      fraction = fraction + (divisor - remainder);
+      if (fraction >= base) {
+        whole += 1n;
+        fraction -= base;
+      }
+    } else {
+      fraction = fraction - remainder;
+    }
+  }
 
   const wholeFormatted = whole.toLocaleString('en-US');
 
   if (decimals <= 0) {
-    return `${negative ? '-' : ''}${wholeFormatted}`;
+    // When decimals <= 0, show .00 (cents format)
+    return `${negative ? '-' : ''}${wholeFormatted}.00`;
   }
 
-  const fractionFormatted = fraction.toString().padStart(decimals, '0').replace(/0+$/, '');
+  const fractionPadded = fraction.toString().padStart(decimals, '0');
+  let fractionFormatted = fractionPadded.replace(/0+$/, '');
+
+  // Always show at least 2 decimal places
+  if (fractionFormatted.length < 2) {
+    fractionFormatted = fractionFormatted.padEnd(2, '0');
+  }
 
   return fractionFormatted === ''
-    ? `${negative ? '-' : ''}${wholeFormatted}`
+    ? `${negative ? '-' : ''}${wholeFormatted}.00`
     : `${negative ? '-' : ''}${wholeFormatted}.${fractionFormatted}`;
 }
 
@@ -86,6 +108,7 @@ function expandScientificNotation(value: string): string | null {
   }
 
   const [, sign, intPart, fracPart = '', expPart] = match;
+  if (!intPart || !expPart) return null;
   const exponent = Number(expPart);
   const digits = intPart + fracPart;
   // Position of the decimal point relative to `digits` after applying the exponent.
@@ -317,6 +340,7 @@ export interface NextActionableState {
 
 export interface NextActionableStateOptions {
   guardianAlreadyVoted?: boolean;
+  now?: Date;
 }
 
 /**
@@ -326,3 +350,75 @@ export interface NextActionableStateOptions {
  * on-chain preconditions are met; and guardians may vote for 
 
 /* … truncated 3004 chars — edit only what you need near the top … */
+
+export function getNextActionableState(
+  will: Will,
+  connectedAddress: string,
+  options: NextActionableStateOptions = {},
+): NextActionableState {
+  const isOwner = will.owner === connectedAddress;
+  const isGuardian = will.guardians.includes(connectedAddress);
+  const isActive = will.status === WillStatus.Active;
+  const isTriggered = will.status === WillStatus.Triggered;
+
+  const now = options.now?.getTime() ?? Date.now();
+
+  // Compute grace period expiry from trigger time
+  const isGracePeriodExpired = will.triggerTime !== null &&
+    (will.triggerTime.getTime() + will.gracePeriodDays * 86_400_000) < now;
+
+  // Compute check-in deadline from last check-in
+  const nextCheckinDeadline = will.lastCheckin.getTime() + will.checkinPeriodDays * 86_400_000;
+  const isCheckinOverdue = isActive && nextCheckinDeadline < now;
+  
+  return {
+    canCheckIn: isOwner && isActive && !isCheckinOverdue,
+    canTrigger: isCheckinOverdue && !isTriggered,
+    canEmergencyCheckIn: isOwner && isTriggered && !isGracePeriodExpired,
+    canRelease: isTriggered && isGracePeriodExpired,
+    canCancel: isOwner && (isActive || isTriggered),
+    canGuardianVote: isGuardian && isActive && !options.guardianAlreadyVoted,
+  };
+}
+
+export function validateGuardians(
+  guardians: string[],
+  ownerAddress?: string,
+): boolean {
+  if (!Array.isArray(guardians)) {
+    return false;
+  }
+
+  for (const guardian of guardians) {
+    if (!StrKey.isValidEd25519PublicKey(guardian)) {
+      return false;
+    }
+  }
+
+  if (ownerAddress) {
+    if (!StrKey.isValidEd25519PublicKey(ownerAddress)) {
+      return false;
+    }
+    if (guardians.includes(ownerAddress)) {
+      return false;
+    }
+  }
+
+  const seen = new Set<string>();
+  for (const guardian of guardians) {
+    if (seen.has(guardian)) {
+      return false;
+    }
+    seen.add(guardian);
+  }
+
+  return true;
+}
+
+export function formatTokenAmount(
+  stroops: bigint | string | number,
+  decimals: number = USDC_DECIMALS,
+): string {
+  const bigIntValue = typeof stroops === 'bigint' ? stroops : BigInt(stroops);
+  return formatUSDC(bigIntValue, decimals);
+}

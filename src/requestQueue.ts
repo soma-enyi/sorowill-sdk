@@ -118,14 +118,14 @@ export class RequestQueue {
       if (signal) {
         request.abortListener = () => {
           // Drop the request from the queue so an aborted request never runs.
-          const index = this.pending.indexOf(request as PendingRequest<unknown>);
-          if (index !== -1) this.pending.splice(index, 1);
+          const index = this.core.pending.indexOf(request as PendingRequest<unknown>);
+          if (index !== -1) this.core.pending.splice(index, 1);
           this.removeAbortListener(request);
           reject(signal.reason);
         };
         signal.addEventListener('abort', request.abortListener);
       }
-      this.pending.push(request as PendingRequest<unknown>);
+      this.core.pending.push(request as PendingRequest<unknown>);
       this.drain();
     });
   }
@@ -246,5 +246,25 @@ export class RequestQueue {
       this.core.active -= 1;
       this.drain();
     }
+  }
+}
+
+const sharedQueueMap = new Map<string, RequestQueue>();
+
+export function getSharedRequestQueue(account?: string): RequestQueue {
+  const key = account ?? '__default__';
+  if (!sharedQueueMap.has(key)) {
+    const opts: RequestQueueOptions = account !== undefined ? { account } : {};
+    sharedQueueMap.set(key, new RequestQueue(opts));
+  }
+  return sharedQueueMap.get(key)!;
+}
+
+export function releaseSharedRequestQueue(account?: string): void {
+  const key = account ?? '__default__';
+  const queue = sharedQueueMap.get(key);
+  if (queue) {
+    queue.release();
+    sharedQueueMap.delete(key);
   }
 }

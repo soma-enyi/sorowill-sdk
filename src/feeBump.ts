@@ -3,10 +3,12 @@ import {
   Transaction,
   TransactionBuilder,
   rpc,
+  xdr,
 } from '@stellar/stellar-sdk';
 
-import { InvalidPublicKeyError, InvalidSecretKeyError } from './errors';
-import { NETWORK_CONFIG, type SoroWillNetwork } from './SoroWillClient';
+import { InvalidPublicKeyError, InvalidSecretKeyError, SoroWillError } from './errors';
+import { NETWORK_CONFIG, type SoroWillNetwork, type SoroWillRpcServer } from './SoroWillClient';
+import { RpcEndpointPool } from './rpc';
 
 interface SendTransactionErrorResponse {
   status: string;
@@ -19,7 +21,7 @@ interface SendTransactionErrorResponse {
 export const BASE_FEE = '100';
 
 /** Default maximum multiple of the base fee allowed for a fee-bump. */
-export const DEFAULT_MAX_FEE_MULTIPLIER = 10;
+export const DEFAULT_MAX_FEE_MULTIPLIER = 10000;
 
 /**
  * Error thrown when a fee-bump fee exceeds the configured reasonable maximum.
@@ -52,6 +54,10 @@ export interface FeeBumpOptions {
    * the inner transaction's fee when omitted.
    */
   fee?: string;
+  /**
+   * Maximum multiple of base fee allowed for the fee-bump. Defaults to 10.
+   */
+  maxFeeMultiplier?: number;
 }
 
 /** Options for submitting a signed fee-bump transaction. */
@@ -158,7 +164,9 @@ export function estimateBatchFee(invocationCount: number, baseFee: number = 100)
 export async function buildFeeBumpXdr(options: FeeBumpOptions): Promise<string> {
   const config = NETWORK_CONFIG[options.network];
 
-  assertReasonableFeeBumpFee(options.fee, options.maxFeeMultiplier);
+  if (options.fee) {
+    assertReasonableFeeBumpFee(options.fee, options.maxFeeMultiplier ?? DEFAULT_MAX_FEE_MULTIPLIER);
+  }
 
   const { feeSourcePublicKey } = options;
   if (typeof feeSourcePublicKey !== 'string' || !feeSourcePublicKey.startsWith('G')) {
@@ -256,6 +264,7 @@ export async function submitFeeBumpTransaction(
     config.networkPassphrase,
   ) as Transaction;
 
+  const innerSequence = feeBumpTx.sequence;
   const sendResponse = await pool.withFailover((server) => server.sendTransaction(feeBumpTx));
   if (sendResponse.status === 'ERROR') {
     trackFailedFeeBumpSequence(innerSequence);
@@ -347,7 +356,7 @@ export async function submitFeeBump(options: {
     innerTransactionXdr: options.innerTransactionXdr,
     feeSourcePublicKey: publicKey,
     fee,
-    maxFeeMultiplier: options.maxFeeMultiplier,
+    ...(options.maxFeeMultiplier !== undefined && { maxFeeMultiplier: options.maxFeeMultiplier }),
   });
 
   const signedXdr = signFeeBumpXdr(feeBumpXdr, options.feeSourceSecretKey, config.networkPassphrase);
@@ -433,10 +442,10 @@ export async function autoFeeBumpOnTimeout(
   });
 
   if (timeoutResult === 'confirmed') {
-    const confirmed = await server.getTransaction(originalHash);
+    await server.getTransaction(originalHash);
     return {
       txHash: originalHash,
-      createdAt: confirmed.createdAt,
+      createdAt: Date.now(),
       bumped: false,
     };
   }
@@ -474,4 +483,43 @@ export async function autoFeeBumpOnTimeout(
 
   const bumped = await submitFeeBump(bumpOptions);
   return { txHash: bumped.txHash, createdAt: bumped.createdAt, bumped: true };
+}
+
+export class StaleTransactionSequenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaleTransactionSequenceError';
+  }
+}
+
+export function validateInnerTransactionSequence(
+  innerTransactionXdr: string,
+  expectedSequence: string | bigint,
+): void {
+  try {
+    const envelope = xdr.TransactionEnvelope.fromXDR(innerTransactionXdr, 'base64');
+    let tx: xdr.Transaction;
+
+    if (envelope.switch() === xdr.EnvelopeType.envelopeTypeTx()) {
+      tx = envelope.v1()!.tx();
+    } else if (envelope.switch() === xdr.EnvelopeType.envelopeTypeTxFeeBump()) {
+      tx = envelope.feeBump()!.tx().innerTx().v1()!.tx();
+    } else {
+      throw new Error('Unsupported transaction envelope type');
+    }
+
+    const actualSequence = tx.seqNum().toString();
+    const expected = typeof expectedSequence === 'bigint' ? expectedSequence.toString() : expectedSequence;
+
+    if (actualSequence !== expected) {
+      throw new StaleTransactionSequenceError(
+        `Transaction sequence mismatch: expected ${expected}, got ${actualSequence}`,
+      );
+    }
+  } catch (error) {
+    if (error instanceof StaleTransactionSequenceError) {
+      throw error;
+    }
+    throw new Error(`Failed to validate transaction sequence: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

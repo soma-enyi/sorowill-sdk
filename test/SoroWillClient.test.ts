@@ -308,7 +308,7 @@ describe('SoroWillClient', () => {
         token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
         amount: 1000n,
       }),
-    ).resolves.toEqual({ resourceFee: '1500' });
+    ).resolves.toEqual({ resourceFee: '1500', totalFee: '1600' });
 
     await expect(
       client.previewFee('top_up', {
@@ -316,7 +316,7 @@ describe('SoroWillClient', () => {
         owner: 'GTESTACCOUNT',
         amount: 500n,
       }),
-    ).resolves.toEqual({ resourceFee: '2750' });
+    ).resolves.toEqual({ resourceFee: '2750', totalFee: '2850' });
 
     expect(mockState.sendTransaction).not.toHaveBeenCalled();
   });
@@ -537,7 +537,7 @@ describe('SoroWillClient', () => {
     const { TransactionBuilder, FeeBumpTransaction } = await import('@stellar/stellar-sdk');
     const origFromXdr = TransactionBuilder.fromXDR;
     TransactionBuilder.fromXDR = vi.fn().mockReturnValue(new FeeBumpTransaction());
-    freighterApiMock.signTransaction.mockResolvedValue({ signedTxXdr: 'SIGNED_TX_XDR', error: undefined });
+    freighterApiMock.signTransaction.mockResolvedValue({ envelope_xdr: 'SIGNED_TX_XDR', error: undefined });
     mockState.simulateTransaction.mockResolvedValue({ result: { retval: undefined } });
 
     try {

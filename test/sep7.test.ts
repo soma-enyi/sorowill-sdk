@@ -20,7 +20,7 @@ describe('buildSep7TxUri', () => {
       callbackUrl: 'https://example.com/callback',
       message: 'Sign this transaction',
     });
-    expect(result).toContain('msg=Sign+this+transaction');
+    expect(result).toContain('msg=Sign%20this%20transaction');
     expect(result).toContain('xdr=AAAAAAAA');
     expect(result).toContain('callback=url%3Ahttps%3A%2F%2Fexample.com%2Fcallback');
   });
@@ -30,7 +30,7 @@ describe('buildSep7TxUri', () => {
       callbackUrl: 'https://example.com/callback',
       networkPassphrase: 'Test SDF Network ; September 2015',
     });
-    expect(result).toContain('network_passphrase=Test+SDF+Network+%3B+September+2015');
+    expect(result).toContain('network_passphrase=Test%20SDF%20Network%20%3B%20September%202015');
   });
 
   it('builds URI with optional originDomain parameter', () => {
@@ -50,8 +50,8 @@ describe('buildSep7TxUri', () => {
     });
     expect(result).toContain('xdr=AAAAAAAA');
     expect(result).toContain('callback=url%3Ahttps%3A%2F%2Fexample.com%2Fcallback');
-    expect(result).toContain('msg=Sign+this+transaction');
-    expect(result).toContain('network_passphrase=Test+SDF+Network+%3B+September+2015');
+    expect(result).toContain('msg=Sign%20this%20transaction');
+    expect(result).toContain('network_passphrase=Test%20SDF%20Network%20%3B%20September%202015');
     expect(result).toContain('origin_domain=example.com');
   });
 
@@ -83,7 +83,7 @@ describe('buildSep7TxUri', () => {
     'rejects invalid callback URL %s',
     (callbackUrl) => {
       expect(() => buildSep7TxUri('AAAAAAAA', { callbackUrl })).toThrow(
-        'SEP-7 callback URL must be an absolute http or https URL',
+        'SEP-7 callback URL must be an absolute https:// URL or a valid deeplink scheme',
       );
     },
   );
@@ -112,8 +112,8 @@ describe('parseSep7Callback', () => {
     expect(result.message).toBeUndefined();
   });
 
-  it('parses callback with signedTxXdr parameter', () => {
-    const result = parseSep7Callback(`signedTxXdr=${SIGNED_XDR}`);
+  it('parses callback with envelope_xdr parameter', () => {
+    const result = parseSep7Callback(`envelope_xdr=${SIGNED_XDR}`);
     expect(result.transactionXdr).toBe(SIGNED_XDR);
   });
 
@@ -128,7 +128,7 @@ describe('parseSep7Callback', () => {
   });
 
   it('prioritizes xdr over other transaction parameter names', () => {
-    const result = parseSep7Callback(`xdr=${SIGNED_XDR}&signedTxXdr=XDR2&signed_tx_xdr=XDR3&tx=XDR4`);
+    const result = parseSep7Callback(`xdr=${SIGNED_XDR}&envelope_xdr=XDR2&signed_tx_xdr=XDR3&tx=XDR4`);
     expect(result.transactionXdr).toBe(SIGNED_XDR);
   });
 
@@ -212,7 +212,7 @@ describe('parseSep7Callback', () => {
 
   it('throws error when transaction XDR parameters are empty strings', () => {
     expect(() => {
-      parseSep7Callback('xdr=&signedTxXdr=&signed_tx_xdr=&tx=');
+      parseSep7Callback('xdr=&envelope_xdr=&signed_tx_xdr=&tx=');
     }).toThrow('SEP-7 callback did not include a signed transaction XDR');
   });
 

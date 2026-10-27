@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../src/wallet', () => ({
   freighterAdapter: {
     getPublicKey: vi.fn(async () => 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+  normalizeSignatureResponse: vi.fn((resp: unknown) => resp),
     signTransaction: vi.fn(async (transactionXdr: string) => transactionXdr),
   },
   getDefaultWalletAdapter: vi.fn(() => ({
@@ -15,6 +16,7 @@ vi.mock('../src/wallet', () => ({
     disconnect: async () => undefined,
   })),
   getPublicKey: vi.fn(async () => 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF'),
+  normalizeSignatureResponse: vi.fn((resp: unknown) => resp),
   signTransaction: vi.fn(async (transactionXdr: string) => transactionXdr),
 }));
 
@@ -98,6 +100,7 @@ describe('batch transactions', () => {
     await expect(client.batch([{ method: 'first_operation', args: {} }])).resolves.toEqual({
       txHash: 'batch-hash',
       createdAt: 1_700_000_000,
+      success: true,
     });
     expect(preparedOperationCount).toBe(1);
   });
@@ -288,7 +291,7 @@ describe('sendTransaction status handling', () => {
 
     await expect(
       client.batch([{ method: 'dummy', args: {} }]),
-    ).resolves.toEqual({ txHash: 'dup-hash', createdAt: 1_700_000_000 });
+    ).resolves.toEqual({ txHash: 'dup-hash', createdAt: 1_700_000_000, success: true });
     expect(pollCalled).toBe(true);
   });
 

@@ -1,5 +1,5 @@
 import { SignTransactionTimeoutError } from './errors';
-import type { WalletAdapter, WalletConnection } from './wallet';
+import type { WalletAdapter, WalletConnection, SignTransactionOptions } from './wallet';
 
 export interface WalletConnectSessionNamespace {
   accounts?: string[];
@@ -106,11 +106,8 @@ const DEFAULT_REQUIRED_NAMESPACES: Record<string, WalletConnectSessionNamespace>
 };
 
 const DEFAULT_DISCONNECT_REASON = { code: 6000, message: 'Disconnected by client' };
-const DEFAULT_SIGN_TIMEOUT_MS = 120_000;
-const DEFAULT_CONNECT_TIMEOUT_MS = 300_000;
-
-/** Default connection timeout: 30 seconds. */
-const DEFAULT_CONNECTION_TIMEOUT_MS = 30_000;
+const _DEFAULT_SIGN_TIMEOUT_MS = 120_000;
+const _DEFAULT_CONNECT_TIMEOUT_MS = 300_000;
 
 /**
  * Raised when a WalletConnect session establishment does not complete within
@@ -221,6 +218,15 @@ export function extractSignedTransactionXdr(response: unknown): string {
     return response.signedTxXdr;
   }
 
+  if (
+    response &&
+    typeof response === 'object' &&
+    'envelope_xdr' in response &&
+    typeof response.envelope_xdr === 'string'
+  ) {
+    return response.envelope_xdr;
+  }
+
   throw new Error('WalletConnect signing response did not include a signed transaction XDR');
 }
 
@@ -314,7 +320,7 @@ export class WalletConnectAdapter implements WalletAdapter {
       await this.options.onPairingUri?.(connection.uri);
     }
 
-    const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    const connectTimeoutMs = this.options.connectTimeoutMs ?? _DEFAULT_CONNECT_TIMEOUT_MS;
     let timeoutHandle: ReturnType<typeof setTimeout>;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutHandle = setTimeout(
@@ -345,12 +351,13 @@ export class WalletConnectAdapter implements WalletAdapter {
 
     const topic = await this.sessionStore.getSessionTopic();
     if (!topic) {
-      throw new Error('No WalletConnect session available to reconnect');
+      throw new Error('No WalletConnect session topic is stored');
     }
 
     const session = await this.client.getSession(topic);
     if (!session) {
-      throw new Error('WalletConnect session could not be restored');
+      await this.sessionStore.clearSessionTopic();
+      throw new Error('Stored WalletConnect session no longer exists');
     }
 
     return this.useSession(session);
@@ -370,6 +377,25 @@ export class WalletConnectAdapter implements WalletAdapter {
     await this.sessionStore.clearSessionTopic();
   }
 
+  private async requireSession(): Promise<WalletConnectSession> {
+    if (this.session) {
+      return this.session;
+    }
+
+    const topic = await this.sessionStore.getSessionTopic();
+    if (!topic) {
+      throw new Error('WalletConnect session not available. Call connect() first.');
+    }
+
+    const session = await this.client.getSession(topic);
+    if (!session) {
+      throw new Error('WalletConnect session could not be found. Reconnect required.');
+    }
+
+    this.session = session;
+    return session;
+  }
+
   async getPublicKey(): Promise<string> {
     const session = await this.requireSession();
     const resolver = this.options.getPublicKeyFromSession ?? getDefaultPublicKeyFromSession;
@@ -382,10 +408,24 @@ export class WalletConnectAdapter implements WalletAdapter {
     return resolver(session);
   }
 
-  async signTransaction(xdr: string): Promise<string> {
+  async signTransaction(xdr: string, options?: SignTransactionOptions): Promise<string> {
     const session = await this.requireSession();
+
+    // Validate that the requested networkPassphrase matches the session's network
+    if (options?.networkPassphrase) {
+      const sessionNetwork = this.resolveNetwork(session);
+      if (options.networkPassphrase !== sessionNetwork.networkPassphrase) {
+        throw new Error(
+          `WalletConnect session is connected to ${sessionNetwork.networkPassphrase}, ` +
+          `but transaction is for ${options.networkPassphrase}`
+        );
+      }
+    }
+
     const chainId = this.options.requestChainId ?? getDefaultChainId(session);
-    const method = this.options.signTransactionMethod ?? 'stellar_signXdr';
+    const method = this.options.signTransactionMethod ?? 'stellar_signXDR';
+    const network = this.resolveNetwork(session);
+    const params = this.options.getSignTransactionParams?.(xdr, network.networkPassphrase) ?? { xdr };
 
     const response = await this.withTimeout(
       this.client.request<unknown>({
@@ -393,7 +433,7 @@ export class WalletConnectAdapter implements WalletAdapter {
         chainId,
         request: {
           method,
-          params: { xdr },
+          params,
         },
       }),
     );
@@ -402,72 +442,26 @@ export class WalletConnectAdapter implements WalletAdapter {
     return extractor(response);
   }
 
-    const sessionNetwork = this.resolveNetwork(session);
-    if (opts.networkPassphrase !== sessionNetwork.networkPassphrase) {
-      throw new Error(
-        `WalletConnect session is connected to ${sessionNetwork.network} (${sessionNetwork.networkPassphrase}) but transaction is for a different network (${opts.networkPassphrase})`,
-      );
-    }
-
-    const topic = await this.sessionStore.getSessionTopic();
-    if (!topic) {
-      throw new Error('WalletConnect is not connected');
-    }
-
-    try {
-      const response = await Promise.race([
-        this.client.request({
-          topic: session.topic,
-          chainId: this.options.requestChainId ?? getDefaultChainId(session),
-          request: {
-            method: this.options.signTransactionMethod ?? 'stellar_signXDR',
-            params: this.options.getSignTransactionParams
-              ? this.options.getSignTransactionParams(transactionXdr, opts.networkPassphrase)
-              : { xdr: transactionXdr },
-          },
-        }),
-        timeoutPromise,
-      ]);
-
-      return (this.options.getSignedTransactionXdr ?? getDefaultSignedTransactionXdr)(response);
-    } finally {
-      clearTimeout(timeoutHandle!);
-    }
-
-    this.session = session;
-    return session;
-  }
-
   private useSession(session: WalletConnectSession): WalletConnection {
     this.session = session;
     this.connection = {
       publicKey: (this.options.getPublicKeyFromSession ?? getDefaultPublicKeyFromSession)(session),
       network: (this.options.getNetworkFromSession ?? getDefaultNetwork)(session).network,
+      networkPassphrase: this.resolveNetwork(session).networkPassphrase,
     };
     void this.sessionStore.setSessionTopic(session.topic);
     return this.connection;
   }
 
-  private buildConnection(session: WalletConnectSession): WalletConnection {
-    const publicKey = (this.options.getPublicKeyFromSession ?? getDefaultPublicKeyFromSession)(session);
-    const network = this.resolveNetwork(session);
-
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new SignTransactionTimeoutError(timeoutMs));
-      }, timeoutMs);
-
-      promise.then(
-        (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      );
-    });
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number = _DEFAULT_SIGN_TIMEOUT_MS): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        setTimeout(() => {
+          reject(new SignTransactionTimeoutError(timeoutMs));
+        }, timeoutMs);
+      }),
+    ]);
   }
 
   private resolveNetwork(session: WalletConnectSession): { network: string; networkPassphrase: string } {

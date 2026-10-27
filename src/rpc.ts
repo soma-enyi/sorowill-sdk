@@ -1,6 +1,34 @@
 import { rpc } from '@stellar/stellar-sdk';
 import type { SoroWillRpcServer } from './SoroWillClient';
 
+export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+export const DEFAULT_RPC_TIMEOUT_MAX_ATTEMPTS = 3;
+export const DEFAULT_RPC_TIMEOUT_RETRY_BASE_DELAY_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wraps a promise with a timeout; rejects if the promise doesn't settle within ms. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (ms <= 0) {
+    return promise;
+  }
+
+  const TIMEOUT_SYMBOL = Symbol('timeout');
+  return Promise.race<T | typeof TIMEOUT_SYMBOL>([
+    promise,
+    new Promise<typeof TIMEOUT_SYMBOL>((resolve) => {
+      setTimeout(() => resolve(TIMEOUT_SYMBOL), ms);
+    }),
+  ]).then((result) => {
+    if (result === TIMEOUT_SYMBOL) {
+      throw new Error(`Request timed out, timeout exceeded ${ms}ms`);
+    }
+    return result as T;
+  });
+}
+
 export function isRetryableRpcConnectionError(error: unknown): boolean {
   const CONNECTION_FRAGMENTS = [
     'fetch failed',
@@ -127,7 +155,7 @@ export async function isTransactionResolved(
   transactionHash: string,
 ): Promise<boolean> {
   try {
-    const response = await server.getTransaction(transactionHash);
+    const response = await server.pollTransaction(transactionHash, { attempts: 1 });
     const status = (response as { status?: unknown }).status;
     return typeof status === 'string' && TERMINAL_TRANSACTION_STATUSES.has(status);
   } catch {
@@ -234,7 +262,8 @@ export class RpcEndpointPool {
 
     for (let attempt = 0; attempt < this.timeoutMaxAttempts; attempt += 1) {
       try {
-        return await operation(server, rpcUrl);
+        // Enforce per-endpoint timeout
+        return await withTimeout(operation(server, rpcUrl), this.timeoutMs);
       } catch (error) {
         lastError = error;
         const isLastAttempt = attempt === this.timeoutMaxAttempts - 1;

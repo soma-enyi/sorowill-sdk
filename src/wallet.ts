@@ -2,6 +2,24 @@ import type FreighterApi from '@stellar/freighter-api';
 
 import { FreighterInstallCheckError, SignTransactionTimeoutError, WalletNetworkMismatchError } from './errors';
 
+export class WalletSessionError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'WalletSessionError';
+  }
+}
+
+/**
+ * Represents a wallet session token used for transaction signing.
+ */
+export interface WalletSession {
+  token: string;
+  expiresAt?: number;
+}
+
+/** Default session token TTL in milliseconds (15 minutes). */
+export const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
+
 /**
  * `@stellar/freighter-api` is an optional peer dependency — consumers who
  * only use Albedo, Ledger, WalletConnect, or a custom {@link WalletAdapter}
@@ -30,13 +48,13 @@ const DEFAULT_SIGN_TIMEOUT_MS = 120_000;
 const FREIGHTER_NOT_INSTALLED_CODE = -1;
 
 /**
- * The structured signature response some wallet adapters (WalletConnect,
- * xBull, …) return instead of a bare signed-XDR string. The SDK normalizes
- * this to the `envelope_xdr` string so callers always receive a string.
+ * The object shape some wallets (notably WalletConnect) return from
+ * `signTransaction` instead of a bare XDR string. The signed envelope is
+ * carried in `envelope_xdr`; `hash` is optional metadata.
  */
 export interface SignatureResponse {
   envelope_xdr: string;
-  hash: string;
+  hash?: string;
 }
 
 /**
@@ -77,16 +95,6 @@ export interface WalletConnection {
   publicKey: string;
   network: string;
   networkPassphrase: string;
-}
-
-/**
- * The object shape some wallets (notably WalletConnect) return from
- * `signTransaction` instead of a bare XDR string. The signed envelope is
- * carried in `envelope_xdr`; `hash` is optional metadata.
- */
-export interface SignatureResponse {
-  envelope_xdr: string;
-  hash?: string;
 }
 
 /**
@@ -244,7 +252,7 @@ export async function ensureValidSession(
     );
   }
 
-  if (session && session.token && session.expiresAt > now) {
+  if (session && session.token && session.expiresAt !== undefined && session.expiresAt > now) {
     return session.token;
   }
 
@@ -264,7 +272,7 @@ export async function ensureValidSession(
     );
   }
 
-  if (!refreshed || !refreshed.token || refreshed.expiresAt <= now) {
+  if (!refreshed || !refreshed.token || refreshed.expiresAt === undefined || refreshed.expiresAt <= now) {
     throw new WalletSessionError(
       'The wallet session token is still invalid after refreshing. Reconnect the wallet and try again.',
     );
@@ -288,9 +296,12 @@ export interface FreighterWalletAdapterOptions {
 
 export class FreighterWalletAdapter implements WalletAdapter {
   private readonly expectedNetworkPassphrase?: string;
+  private session?: WalletSession;
 
   constructor(options: FreighterWalletAdapterOptions = {}) {
-    this.expectedNetworkPassphrase = options.expectedNetworkPassphrase;
+    if (options.expectedNetworkPassphrase !== undefined) {
+      this.expectedNetworkPassphrase = options.expectedNetworkPassphrase;
+    }
   }
 
   /**
@@ -369,7 +380,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
   }
 
   async disconnect(): Promise<void> {
-    this.session = undefined;
+    delete (this as unknown as Record<string, unknown>).session;
     return;
   }
 
@@ -433,7 +444,7 @@ export class FreighterWalletAdapter implements WalletAdapter {
 
     // Race the Freighter call against a timer so that a hung or dismissed
     // popup never leaves the caller's promise pending
-    const result = await Promise.race([
+    const result = await Promise.race<unknown>([
       freighterApiPromise.then((freighterApi) =>
         freighterApi.signTransaction(transactionXdr, {
           networkPassphrase: opts.networkPassphrase,
@@ -445,7 +456,10 @@ export class FreighterWalletAdapter implements WalletAdapter {
     ]);
 
     if (result && typeof result === 'object' && 'error' in result && result.error) {
-      throw new Error(result.error.message);
+      const errorMessage = typeof result.error === 'object' && result.error !== null && 'message' in result.error
+        ? String((result.error as Record<string, unknown>).message)
+        : String(result.error);
+      throw new Error(errorMessage);
     }
 
     // Freighter returns a bare XDR string, but normalize defensively so any
@@ -494,6 +508,20 @@ export class WalletConnectWalletAdapter implements WalletAdapter {
     return this.connector.disconnect();
   }
 
+  getPublicKey(): Promise<string> {
+    return this.connector.getPublicKey();
+  }
+
+  async signTransaction(
+    transactionXdr: string,
+    options: SignTransactionOptions,
+  ): Promise<string | SignatureResponse> {
+    return this.connector.signTransaction(transactionXdr, options);
+  }
+}
+
+const defaultFreighterWalletAdapter = new FreighterWalletAdapter();
+
 /**
  * The default {@link WalletAdapter}, backed by the Freighter browser
  * extension. This is what {@link SoroWillClient} uses when no `wallet` option
@@ -504,7 +532,36 @@ export const freighterAdapter: WalletAdapter = {
   connect: () => defaultFreighterWalletAdapter.connect(),
   reconnect: () => defaultFreighterWalletAdapter.reconnect(),
   disconnect: () => defaultFreighterWalletAdapter.disconnect(),
-  getPublicKey,
-  signTransaction,
+  getPublicKey: () => defaultFreighterWalletAdapter.getPublicKey(),
+  signTransaction: (xdr: string, opts: SignTransactionOptions) => defaultFreighterWalletAdapter.signTransaction(xdr, opts),
   getNetwork: () => defaultFreighterWalletAdapter.getNetwork(),
 };
+
+export function getDefaultWalletAdapter(): WalletAdapter {
+  return freighterAdapter;
+}
+
+export async function getPublicKey(): Promise<string> {
+  return defaultFreighterWalletAdapter.getPublicKey();
+}
+
+export async function signTransaction(xdr: string, opts: SignTransactionOptions): Promise<string> {
+  return defaultFreighterWalletAdapter.signTransaction(xdr, opts);
+}
+
+export async function isFreighterInstalled(): Promise<boolean> {
+  try {
+    const freighterApi = await loadFreighterApi();
+    const { isConnected, error } = await freighterApi.isConnected();
+    if (error && error.code === FREIGHTER_NOT_INSTALLED_CODE) {
+      return false;
+    }
+    return isConnected && !error;
+  } catch {
+    return false;
+  }
+}
+
+export async function connectWallet(): Promise<WalletConnection> {
+  return defaultFreighterWalletAdapter.connect();
+}

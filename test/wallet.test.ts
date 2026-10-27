@@ -132,14 +132,27 @@ describe('signTransaction', () => {
   const testXdr = 'AAAAAgAAAAD...base64xdr...';
   const signedXdr = 'AAAAAgAAAAD...signed...';
   const networkPassphrase = 'Test SDF Network ; September 2015';
+  const testAddress = 'GTESTACCOUNT12345678901234567890123456789012';
 
   beforeEach(() => {
     freighterApiMock.signTransaction.mockReset();
+    freighterApiMock.getAddress.mockReset();
+    freighterApiMock.getNetworkDetails.mockReset();
+    // Set up default mocks for session validation
+    freighterApiMock.getAddress.mockResolvedValue({
+      address: testAddress,
+      error: undefined,
+    });
+    freighterApiMock.getNetworkDetails.mockResolvedValue({
+      network: 'TESTNET',
+      networkPassphrase,
+      error: undefined,
+    });
   });
 
   it('returns the signed transaction XDR on success', async () => {
     freighterApiMock.signTransaction.mockResolvedValue({
-      signedTxXdr: signedXdr,
+      envelope_xdr: signedXdr,
       error: undefined,
     });
 
@@ -153,7 +166,7 @@ describe('signTransaction', () => {
 
   it('throws when the user rejects the signing request', async () => {
     freighterApiMock.signTransaction.mockResolvedValue({
-      signedTxXdr: '',
+      envelope_xdr: '',
       error: { code: 4, message: 'User rejected the transaction' },
     });
 
@@ -164,7 +177,7 @@ describe('signTransaction', () => {
 
   it('throws when Freighter reports a signing error', async () => {
     freighterApiMock.signTransaction.mockResolvedValue({
-      signedTxXdr: '',
+      envelope_xdr: '',
       error: { code: -1, message: 'Internal signing failure' },
     });
 
@@ -249,15 +262,34 @@ describe('FreighterWalletAdapter', () => {
   });
 
   describe('signTransaction', () => {
+    const testAddress = 'GTESTACCOUNT12345678901234567890123456789012';
+    const networkPassphrase = 'Test SDF Network ; September 2015';
+
+    beforeEach(() => {
+      freighterApiMock.signTransaction.mockReset();
+      freighterApiMock.getAddress.mockReset();
+      freighterApiMock.getNetworkDetails.mockReset();
+      // Set up default mocks for session validation
+      freighterApiMock.getAddress.mockResolvedValue({
+        address: testAddress,
+        error: undefined,
+      });
+      freighterApiMock.getNetworkDetails.mockResolvedValue({
+        network: 'TESTNET',
+        networkPassphrase,
+        error: undefined,
+      });
+    });
+
     it('returns signed XDR on success', async () => {
       freighterApiMock.signTransaction.mockResolvedValue({
-        signedTxXdr: 'SIGNED_XDR',
+        envelope_xdr: 'SIGNED_XDR',
         error: undefined,
       });
 
       const adapter = new FreighterWalletAdapter();
       const result = await adapter.signTransaction('RAW_XDR', {
-        networkPassphrase: 'Test SDF Network ; September 2015',
+        networkPassphrase,
       });
 
       expect(result).toBe('SIGNED_XDR');
@@ -265,14 +297,14 @@ describe('FreighterWalletAdapter', () => {
 
     it('throws on user rejection', async () => {
       freighterApiMock.signTransaction.mockResolvedValue({
-        signedTxXdr: '',
+        envelope_xdr: '',
         error: { code: 4, message: 'Transaction rejected by user' },
       });
 
       const adapter = new FreighterWalletAdapter();
       await expect(
         adapter.signTransaction('RAW_XDR', {
-          networkPassphrase: 'Test SDF Network ; September 2015',
+          networkPassphrase,
         }),
       ).rejects.toThrow('Transaction rejected by user');
     });

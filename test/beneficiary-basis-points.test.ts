@@ -7,7 +7,7 @@ const { freighterApiMock, mockState } = vi.hoisted(() => ({
     requestAccess: vi.fn(),
     getNetworkDetails: vi.fn().mockResolvedValue({ network: 'TESTNET', networkPassphrase: 'TESTNET' }),
     isConnected: vi.fn(),
-    signTransaction: vi.fn(async () => ({ signedTxXdr: 'SIGNED_XDR', error: undefined })),
+    signTransaction: vi.fn(async () => ({ envelope_xdr: 'SIGNED_XDR', error: undefined })),
   },
   mockState: {
     getAccount: vi.fn(async (publicKey: string) => ({ accountId: publicKey, sequence: '1' })),
@@ -215,7 +215,7 @@ describe('contract basis points -> beneficiary percentage (#362)', () => {
     return {
       id: 1n,
       owner: A,
-      token: 'CTOKEN',
+      token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
       balance: 1_000_000n,
       beneficiaries,
       checkin_period_days: 90n,
@@ -239,7 +239,7 @@ describe('contract basis points -> beneficiary percentage (#362)', () => {
     ];
     const client = makeClient();
     await client.createWill({
-      token: 'CTOKEN',
+      token: 'CAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQC526',
       amount: '1000000',
       beneficiaries: input,
       checkinPeriodDays: 90,
